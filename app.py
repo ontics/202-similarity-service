@@ -41,6 +41,14 @@ def get_model():
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
+@app.route('/', methods=['GET', 'HEAD'])
+def root():
+    """Root endpoint for health checks."""
+    return jsonify({
+        "status": "ok",
+        "message": "Similarity service is running"
+    })
+
 @app.route('/compare', methods=['POST'])
 def compare_texts():
     if SHUTDOWN_REQUESTED:
@@ -79,36 +87,40 @@ def compare_texts_batch():
 
     try:
         data = request.json
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Received batch comparison request with {len(data)} items")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Calculating batch similarity for {len(data)} pairs")
         
         model = get_model()
         
-        # Process in smaller batches to manage memory
-        batch_size = 32
-        results = []
+        # Prepare all texts in two lists
+        words = [item['word'].lower() for item in data]
+        descriptions = [item['description'].lower() for item in data]
         
-        # Process texts in chunks
-        for i in range(0, len(data), batch_size):
-            chunk = data[i:i + batch_size]
-            all_texts = []
-            for item in chunk:
-                all_texts.extend([item['word'], item['description']])
-            
-            # Get embeddings for current chunk
-            embeddings = model.encode(all_texts, batch_size=32, show_progress_bar=False)
-            
-            # Calculate similarities for current chunk
-            for j in range(0, len(embeddings), 2):
-                similarity = cosine_similarity(embeddings[j], embeddings[j+1])
-                results.append({
-                    'similarity': float(similarity),
-                    'model': 'sbert'
-                })
-            
-            # Force garbage collection after each chunk
-            gc.collect()
+        # Get embeddings for all texts at once
+        start_time = time.time()
+        word_embeddings = model.encode(words, batch_size=64, show_progress_bar=False)
+        desc_embeddings = model.encode(descriptions, batch_size=64, show_progress_bar=False)
         
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Batch comparison complete")
+        # Calculate similarities using vectorized operations
+        # Normalize embeddings
+        word_norms = np.linalg.norm(word_embeddings, axis=1, keepdims=True)
+        desc_norms = np.linalg.norm(desc_embeddings, axis=1, keepdims=True)
+        word_embeddings_normalized = word_embeddings / word_norms
+        desc_embeddings_normalized = desc_embeddings / desc_norms
+        
+        # Calculate dot products
+        similarities = np.sum(word_embeddings_normalized * desc_embeddings_normalized, axis=1)
+        
+        # Create results
+        results = [
+            {'similarity': float(sim), 'model': 'sbert'}
+            for sim in similarities
+        ]
+        
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Batch processing completed in {time.time() - start_time:.2f} seconds")
+        
+        # Force garbage collection
+        gc.collect()
+        
         return jsonify(results)
     except Exception as e:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error in batch comparison: {str(e)}")
@@ -119,17 +131,34 @@ def health_check():
     if SHUTDOWN_REQUESTED:
         return jsonify({'error': 'Service is shutting down'}), 503
 
-    uptime = time.time() - STARTUP_TIME
-    model_status = "loaded" if SBERT_MODEL is not None else "not_loaded"
-    health_data = {
-        "status": "healthy",
-        "uptime": f"{uptime:.2f} seconds",
-        "model_status": model_status,
-        "model_load_time": f"{MODEL_LOAD_TIME:.2f} seconds" if MODEL_LOAD_TIME else None,
-        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
-    }
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Health check: {health_data}")
-    return jsonify(health_data), 200
+    try:
+        # Try to get the model to ensure it's loaded
+        model = get_model()
+        
+        uptime = time.time() - STARTUP_TIME
+        model_status = "loaded" if model is not None else "not_loaded"
+        
+        # Do a quick test comparison to verify model is working
+        test_embeddings = model.encode(["test", "test"], batch_size=2, show_progress_bar=False)
+        test_similarity = cosine_similarity(test_embeddings[0], test_embeddings[1])
+        
+        health_data = {
+            "status": "healthy",
+            "uptime": f"{uptime:.2f} seconds",
+            "model_status": model_status,
+            "model_load_time": f"{MODEL_LOAD_TIME:.2f} seconds" if MODEL_LOAD_TIME else None,
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "test_similarity": float(test_similarity)
+        }
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Health check: {health_data}")
+        return jsonify(health_data), 200
+    except Exception as e:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Health check failed: {str(e)}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+        }), 500
 
 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting similarity service...")
 
@@ -138,4 +167,7 @@ if os.environ.get('PRELOAD_MODEL', 'true').lower() == 'true':
     get_model()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Get port from environment variable with fallback to 10000 (Render's default)
+    port = int(os.environ.get('PORT', 10000))
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting server on port {port}")
+    app.run(host='0.0.0.0', port=port)
