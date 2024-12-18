@@ -170,4 +170,4 @@ if __name__ == '__main__':
     # Get port from environment variable with fallback to 10000 (Render's default)
     port = int(os.environ.get('PORT', 10000))
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting server on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000)
